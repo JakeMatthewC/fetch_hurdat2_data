@@ -6,8 +6,8 @@ from psycopg2.extras import execute_values, Json
 from sqlalchemy import create_engine
 
 # modules
-import utils as u
-import storm_buoy_match as sbm
+import helpers.utils as u
+import helpers.storm_buoy_match as sbm
 
 engine = create_engine("postgresql+psycopg2://Jacob:@localhost:5432/postgres")
 
@@ -27,15 +27,15 @@ track_rows = []
 for i, line in enumerate(lines):
     if line.startswith(('AL', 'EP')):
         parts = [p.strip() for p in line.split(',')]
-        storm_id = parts[0]
+        hurdat_storm_id = parts[0]
         storm_name = parts[1]
         track_count = int(parts[2])
-        basin = storm_id[:2]
-        storm_number = int(storm_id[2:4])
-        season_year = int(storm_id[4:])
+        basin = hurdat_storm_id[:2]
+        storm_number = int(hurdat_storm_id[2:4])
+        season_year = int(hurdat_storm_id[4:])
 
         storm_rows.append({
-            'storm_id': storm_id,
+            'hurdat_storm_id': hurdat_storm_id,
             'storm_name': storm_name,
             'basin': basin,
             'season_year': season_year,
@@ -53,8 +53,6 @@ for i, line in enumerate(lines):
         pressure = int(fields[7]) if fields[7].isdigit() and int(fields[7]) != -999 else None
         storm_type = fields[3]
 
-        
-
         radii_34kt = {
             'ne': u.parse_radius(fields[8]),
             'se': u.parse_radius(fields[9]),
@@ -64,7 +62,7 @@ for i, line in enumerate(lines):
         rad_max_wind = u.parse_radius(fields[20])
 
         track_rows.append({
-            'storm_id': storm_id,
+            'hurdat_storm_id': hurdat_storm_id,
             'timestamp': timestamp,
             'lat': lat,
             'lon': lon,
@@ -87,7 +85,7 @@ for storm in storm_rows:
 prev_points = {}
 
 for t in track_rows:
-    sid = t['storm_id']
+    sid = t['hurdat_storm_id']
     if sid in prev_points:
         prev = prev_points[sid]
         delta_hours = (t['timestamp'] - prev['timestamp']).total_seconds() / 3600.0
@@ -117,7 +115,7 @@ cur = conn.cursor()
 # organize storm parameters for storms db
 storm_values = [
     (
-        s['storm_id'],
+        s['hurdat_storm_id'],
         s['storm_name'],
         s['basin'],
         s['season_year'],
@@ -130,56 +128,58 @@ storm_values = [
 # store storm parameters
 execute_values(cur, """
     INSERT INTO storms.storms
-    (storm_id, storm_name, basin, season_year, storm_number, start_time, end_time)
+    (hurdat_storm_id, storm_name, basin, season_year, storm_number, start_time, end_time)
     VALUES %s
-    ON CONFLICT (storm_id) DO NOTHING;
+    ON CONFLICT (hurdat_storm_id) DO NOTHING;
 """, storm_values)
 
-cur.execute("SELECT id, storm_id FROM storms.storms")
+conn.commit()
+
+cur.execute("SELECT id, hurdat_storm_id FROM storms.storms")
 id_map = {row[1]: row[0] for row in cur.fetchall()}
 
 # organize storm track data for tracks db
 track_values = [
     (
-        t['storm_id'],
+        t['hurdat_storm_id'],
         t['timestamp'],
         t['lat'],
         t['lon'],
         t['wind_speed'],
         t['pressure'],
         t['storm_type'],
-        Json(t['radii_34kt']),
+        #Json(t['radii_34kt']),
         t['rad_max_wind'],
         t['heading'],
         t['speed']
     )
-    for t in track_rows if t['storm_id'] in id_map
+    for t in track_rows if t['hurdat_storm_id'] in id_map
 ]
 
 # convert track_values to dataframe
-df_track_values = pd.DataFrame(track_values,columns=['storm_id','timestamp', 'lat', 'lon', 'wind_speed', 'pressure', 'storm_type', 'radii_34kt'
+df_track_values = pd.DataFrame(track_values,columns=['hurdat_storm_id','timestamp', 'lat', 'lon', 'wind_speed', 'pressure', 'storm_type',
                                                      'rad_max_wind', 'heading', 'speed'])
 # remove the unused columns for now
-df_track_values.drop(columns=['radii_34kt','rad_max_wind'], inplace=True)
+df_track_values.drop(columns=['rad_max_wind'], inplace=True)
 
 # roughly interpolate to 30 minute timesteps
 df_interp_track_values = u.interpolate_storm_timesteps(df_track_values)
 
 # store interpolated track data
-df_interp_track_values.to_sql("storm_tracks", engine, schema="storms", index=False, if_exist="append")
+df_interp_track_values.to_sql("storm_tracks", engine, schema="storms", index=False, if_exists="append")
 
 '''# store track data
 execute_values(cur, """
     INSERT INTO storms.storm_tracks
-    (storm_id, timestamp, lat, lon, wind_speed, pressure, storm_type, heading, speed)
+    (hurdat_storm_id, timestamp, lat, lon, wind_speed, pressure, storm_type, heading, speed)
     VALUES %s;
 """, track_values)'''
 
 conn.commit()
 
 # flag buoy timesteps is_storm=True where needed, update storm_matches table
-sbm.storm_buoy_match(df_interp_track_values, None)
+sbm.storm_buoy_match(cur, df_interp_track_values, None)
 
-
+conn.commit()
 cur.close()
 conn.close()

@@ -25,7 +25,7 @@ def calculate_speed_kts(distance_km, delta_hours):
 def interpolate_storm_timesteps(df_track_values):
     interval_minutes = 30
     # get storm ids and so you can loop through each storm separately
-    storm_ids = df_track_values['storm_id'].unique()
+    hurdat_storm_ids = df_track_values['hurdat_storm_id'].unique()
 
     conn = psycopg2.connect(
     dbname="postgres",
@@ -37,20 +37,25 @@ def interpolate_storm_timesteps(df_track_values):
 
     exist_storms = []
     # search for storms that have already been uploaded and skip those
-    for storm_id in storm_ids:
-        check_storm = check_exist_storm(conn, storm_id)
+    for hurdat_storm_id in hurdat_storm_ids:
+        check_storm = check_exist_storm(conn, hurdat_storm_id)
         if check_storm:
-            exist_storms.append(storm_id)
+            exist_storms.append(hurdat_storm_id)
         else:  
             continue
 
     # remove the existing storms from the dataframe
-    df_track_values = df_track_values[~df_track_values['storm_id'].isin(exist_storms)]
+    df_track_values = df_track_values[~df_track_values['hurdat_storm_id'].isin(exist_storms)]
 
     interpolated_rows = []
     # loop through each separate storm
-    for sid in storm_ids:
-        storm = df_track_values.loc[df_track_values['storm_id'] == sid].sort_values("timestamp")
+    for sid in hurdat_storm_ids:
+        storm = df_track_values.loc[df_track_values['hurdat_storm_id'] == sid].sort_values("timestamp")
+
+        
+        if storm.empty:
+            continue
+
         # loop through the track and interpolate to 30 minutes
         for i in range(len(storm) - 1):
             row_start = storm.iloc[i]
@@ -78,7 +83,7 @@ def interpolate_storm_timesteps(df_track_values):
                     pressure = None
 
                 interpolated_rows.append({
-                    "storm_id": sid,
+                    "hurdat_storm_id": sid,
                     "timestamp": interpolated_time,
                     "lat": lat,
                     "lon": lon,
@@ -97,10 +102,27 @@ def interpolate_storm_timesteps(df_track_values):
 def parse_radius(val):
     return None if val == "-999" or int(val) == -999 else int(val)
 
-def check_exist_storm(conn, storm_id):
+def check_exist_storm(conn, hurdat_storm_id):
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id FROM storms.storms
-            WHERE storm_id = %s
-        """, (storm_id,))
+            SELECT id FROM storms.storm_tracks
+            WHERE hurdat_storm_id = %s
+        """, (hurdat_storm_id,))
         return cur.fetchone()
+    
+def safe_val(val):
+    return None if pd.isna(val) else val
+
+def update_buoy_time_steps(buoys_with_ts, storm_row, dist, idx):
+    import query as q
+    storm_name = q.get_storm_name(storm_row['hurdat_storm_id'])
+    buoys_with_ts.at[idx,'storm_name'] = storm_name
+    buoys_with_ts.at[idx,'storm_type'] = storm_row['storm_type']
+    buoys_with_ts.at[idx,'storm_heading_deg'] = storm_row['heading']
+    buoys_with_ts.at[idx,'storm_speed_kts'] = storm_row['speed']
+    buoys_with_ts.at[idx,'storm_distance_km'] = dist
+    buoys_with_ts.at[idx,'storm_section_9'] = None
+    buoys_with_ts.at[idx,'hurdat_storm_id'] = storm_row['hurdat_storm_id']
+    buoys_with_ts.at[idx,'is_storm'] = True
+    return buoys_with_ts, storm_name
+
